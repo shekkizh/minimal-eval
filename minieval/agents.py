@@ -6,6 +6,7 @@ import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from .dependencies import MANIFEST_NAME, load_dependencies
 from .sandbox import Sandbox
 
 AGENT_INSTALL_DIR = "/agent"
@@ -18,6 +19,7 @@ class Agent(ABC):
         self.name = name
         self.model = model
         self.extra_env = extra_env or {}
+        self.dependencies: dict = {}
 
     @abstractmethod
     def setup(self, sandbox: Sandbox) -> None: ...
@@ -40,10 +42,12 @@ class ScriptAgent(Agent):
     def __init__(self, name: str, path: Path, model: str, extra_env: dict[str, str] | None = None):
         super().__init__(name, model, extra_env)
         self.path = path
+        self.dependencies = load_dependencies(path / MANIFEST_NAME)
         self.files: dict[str, str | bytes] = {
             str(f.relative_to(path)): f.read_bytes()
             for f in sorted(path.rglob("*"))
             if f.is_file() and not f.is_symlink() and not any(part in (".git", "__pycache__") for part in f.relative_to(path).parts)
+            and f != path / MANIFEST_NAME
         }
         self.executables = [name for name in self.files if (path / name).stat().st_mode & 0o111]
         if "run.sh" not in self.files:

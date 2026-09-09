@@ -4,16 +4,23 @@ import unittest
 from pathlib import Path
 
 from minieval.agents import ScriptAgent
-from minieval.sandbox import DockerSandbox
+from minieval.dependencies import install_dependencies
+from minieval.env import load_env
+from minieval.sandbox import VercelSandbox
 
 
-@unittest.skipUnless(os.environ.get('TEST_DOCKER') == '1', 'set TEST_DOCKER=1 for Linux permission checks')
+@unittest.skipUnless(os.environ.get('TEST_VERCEL') == '1', 'set TEST_VERCEL=1 for live sandbox permission checks')
 class PermissionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        load_env(Path(__file__).resolve().parents[1])
+
     def test_agent_cannot_modify_code_or_read_verifier(self):
-        sandbox = DockerSandbox()
+        sandbox = VercelSandbox(timeout_ms=120000)
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 source = Path(tmp)
+                install_dependencies(sandbox, {}, source / 'setup_output.txt')
                 (source / 'run.sh').write_text('exec python3 /agent/check.py "$1"')
                 (source / 'helper').write_text('#!/bin/sh\nprintf executable')
                 (source / 'helper').chmod(0o755)

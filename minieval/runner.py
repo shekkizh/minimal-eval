@@ -7,7 +7,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .agents import ARTIFACTS_DIR, Agent
-from .sandbox import Sandbox, create_sandbox
+from .dependencies import MANIFEST_NAME, SETUP_TIMEOUT, install_dependencies
+from .sandbox import DEFAULT_IMAGE, Sandbox, create_sandbox
 from .task import Task
 from .types import RunResult
 
@@ -22,7 +23,6 @@ def run_attempt(
     task: Task,
     agent: Agent,
     run_number: int,
-    backend: str,
     time_limit: float,
     output_dir: Path,
     sandbox_kwargs: dict | None = None,
@@ -34,7 +34,9 @@ def run_attempt(
     result = RunResult(task=task.name, agent=agent.name, model=agent.model,
                        run=run_number, passed=False)
     try:
-        sandbox = create_sandbox(backend, timeout_s=time_limit, **(sandbox_kwargs or {}))
+        (output_dir / MANIFEST_NAME).write_text(json.dumps(agent.dependencies, indent=2) + "\n")
+        sandbox = create_sandbox(timeout_s=time_limit + SETUP_TIMEOUT, **(sandbox_kwargs or {}))
+        install_dependencies(sandbox, agent.dependencies, output_dir / "setup_output.txt")
         if task.environment_files:
             sandbox.write_files(task.environment_files)
         agent.setup(sandbox)
@@ -95,7 +97,6 @@ def run_suite(
     tasks: list[Task],
     agents: list[Agent],
     runs: int,
-    backend: str,
     time_limit: float,
     results_dir: Path,
     run_name: str | None = None,
@@ -120,7 +121,6 @@ def run_suite(
                     task=task,
                     agent=agent,
                     run_number=run_number,
-                    backend=backend,
                     time_limit=time_limit,
                     output_dir=suite_dir / _slug(task.name) / _slug(agent.name) / _slug(agent.model) / f"run-{run_number}",
                     sandbox_kwargs=sandbox_kwargs,
@@ -132,7 +132,9 @@ def run_suite(
     summary = {
         "name": name,
         "started": stamp,
-        "backend": backend,
+        "backend": "vercel",
+        "image": (sandbox_kwargs or {}).get("image", DEFAULT_IMAGE),
+        "platform": "linux/amd64",
         "runs_per_combination": runs,
         "results": [r.as_dict() for r in results],
         "totals": _totals(results),
@@ -145,10 +147,12 @@ def run_suite(
 
 def _totals(results: list[RunResult]) -> dict:
     passed = sum(1 for r in results if r.passed)
+    evaluated = sum(1 for r in results if r.failure_type != "infra")
     return {
         "total": len(results),
         "passed": passed,
-        "pass_rate": round(passed / len(results), 3) if results else 0.0,
+        "evaluated": evaluated,
+        "pass_rate": round(passed / evaluated, 3) if evaluated else None,
         "by_failure_type": {
             k: sum(1 for r in results if not r.passed and r.failure_type == k)
             for k in ("verification", "timeout", "infra")
@@ -162,5 +166,7 @@ def _print_summary(results: list[RunResult]) -> None:
         groups.setdefault((r.task, r.agent, r.model), []).append(r)
     print("\n=== Summary ===")
     for (task, agent, model), rs in sorted(groups.items()):
-        passed = sum(1 for r in rs if r.passed)
-        print(f"{task:22s} {agent:18s} {model:38s} {passed}/{len(rs)} passed")
+        totals = _totals(rs)
+        print(f"{task:22s} {agent:18s} {model:38s} "
+              f"{totals['passed']}/{totals['evaluated']} passed; "
+              f"{totals['by_failure_type']['infra']} infra errors")

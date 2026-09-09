@@ -10,7 +10,7 @@ from pathlib import Path
 from . import env as env_loader
 from .agents import discover_agent, list_agents
 from .runner import run_suite
-from .sandbox import DEFAULT_DOCKER_IMAGE
+from .sandbox import DEFAULT_IMAGE
 from .task import discover_tasks
 
 
@@ -27,14 +27,13 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--agent", action="append", default=[], help="Agent dir name (repeatable; default minimal-agent).")
     run.add_argument("--model", action="append", default=[], help="Agent model id (repeatable; required).")
     run.add_argument("--runs", type=int, default=1, help="Runs per (task, agent, model).")
-    run.add_argument("--sandbox", default="auto", choices=["auto", "docker", "vercel"])
     run.add_argument("--time-limit", type=float, default=600.0, help="Agent wall-clock limit in seconds (setup and verification are additional).")
     run.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="Extra env var for the agent process (repeatable).")
     run.add_argument("--name", default=None, help="Name for this suite run (results dir).")
     run.add_argument("--tasks-dir", default="tasks")
     run.add_argument("--agents-dir", default="agents")
     run.add_argument("--results-dir", default="results")
-    run.add_argument("--image", default=DEFAULT_DOCKER_IMAGE, help="Docker image (docker backend).")
+    run.add_argument("--image", default=DEFAULT_IMAGE, help="Vercel sandbox image (default: pinned universal image).")
 
     args = parser.parse_args(argv)
     root = Path.cwd()
@@ -66,25 +65,29 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--env must be KEY=VALUE with a nonempty key")
     if args.name and (Path(args.name).name != args.name or args.name in (".", "..")):
         parser.error("--name must be a directory name, not a path")
-    if args.sandbox == "auto":
-        args.sandbox = "vercel" if os.environ.get("VERCEL_TOKEN") else "docker"
     extra_env = dict(kv.split("=", 1) for kv in args.env)
-    agents = [
-        discover_agent(root / args.agents_dir, name, model, extra_env)
-        for name in (args.agent or ["minimal-agent"])
-        for model in args.model
-    ]
+    try:
+        agents = [
+            discover_agent(root / args.agents_dir, name, model, extra_env)
+            for name in (args.agent or ["minimal-agent"])
+            for model in args.model
+        ]
+    except (ValueError, OSError) as err:
+        parser.error(str(err))
 
-    sandbox_kwargs = {"image": args.image} if args.sandbox in ("docker", "auto") else {}
+    missing = [key for key in ("VERCEL_TOKEN", "VERCEL_PROJECT_ID") if not os.environ.get(key)]
+    if missing:
+        parser.error(f"required Vercel configuration missing: {', '.join(missing)} (set in .env or the environment)")
+
+    sandbox_kwargs = {"image": args.image}
     print(
         f"Running {len(tasks)} task(s) x {len(agents)} agent/model combos x {args.runs} run(s) "
-        f"on backend '{args.sandbox}'"
+        "on Vercel"
     )
     run_suite(
         tasks=tasks,
         agents=agents,
         runs=args.runs,
-        backend=args.sandbox,
         time_limit=args.time_limit,
         results_dir=root / args.results_dir,
         run_name=args.name,
