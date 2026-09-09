@@ -3,7 +3,7 @@
 A small agent eval harness: prepare a disposable sandbox, give an agent a task,
 wait for it to finish, run a hidden verifier, and save artifacts for review.
 The agent owns its tool loop, transcripts, and metrics. The harness does not
-parse or replay them. Python 3.10+, no Python dependencies.
+parse or replay them. Python 3.10+, with an optional Python dependency for Modal.
 
 ## Run
 
@@ -14,8 +14,9 @@ python3 -m minieval run --task fix-median --model anthropic/claude-haiku-4.5
 ```
 
 Configure `VERCEL_TOKEN` and `VERCEL_PROJECT_ID` in `.env`, plus `VERCEL_TEAM_ID`
-for a team project. Every eval runs in a disposable Vercel sandbox and requires
-network access. The bundled example agent uses `API_KEY`
+for a team project. Vercel is the default; select Modal with `--sandbox modal`
+or `MINIEVAL_SANDBOX=modal` in `.env`. Every eval runs in a disposable sandbox
+and requires network access. The bundled example agent uses `API_KEY`
 and optionally `BASE_URL`. Other agents use their own model IDs
 and credentials.
 
@@ -24,6 +25,38 @@ repeats each combination. Use `--env KEY=VALUE` for agent configuration,
 `--time-limit 600` for the agent command timeout, and `--name experiment`
 for a new results directory. Setup, verification, and artifact collection
 are additional to the agent timeout.
+
+### Modal setup
+
+Install the optional SDK in a virtual environment, then save and activate your
+Modal profile. The token command prompts for the ID and secret, keeping them
+out of shell history:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[modal]"
+modal token set --profile=shekkizh
+modal profile activate shekkizh
+python -m minieval run --sandbox modal --task fix-median --model anthropic/claude-haiku-4.5
+```
+
+Replace `shekkizh` with your profile name if different. `modal token set` verifies
+and activates the profile by default, so the explicit activation step is optional.
+Credentials live in `~/.modal.toml`; `MODAL_PROFILE` can select a profile for this
+project. Alternatively, set `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` in `.env` or
+the host environment. Modal credentials are not forwarded to the agent.
+Vercel credentials are only required for Vercel runs.
+See [Modal authentication](https://modal.com/docs/sdk/py/latest/config) and
+[token CLI options](https://modal.com/docs/cli/latest/token).
+
+The harness creates a Modal app named `minieval` on first use. Each attempt gets
+a fresh CPU sandbox with 1 CPU and 2 GiB of memory; it is terminated after artifact
+collection. The sandbox lifetime includes the agent limit, 300 seconds for setup,
+and 180 seconds for grading/collection. Modal caches the baseline image build;
+the first run can take longer. The Starter plan currently includes $30/month in
+compute credits; usage beyond the credits is billed according to
+[Modal pricing](https://modal.com/pricing).
 
 ## Tasks
 
@@ -138,15 +171,23 @@ remain visible in `total` and `by_failure_type`. With no evaluated attempts,
 
 ## Sandbox and checks
 
-The sandbox uses a pinned digest of `vcr.vercel.com/vercel/sandbox/universal`:
+Vercel uses a pinned digest of `vcr.vercel.com/vercel/sandbox/universal`:
 Vercel's Ubuntu image with Node 24, Python 3.14, coding agents, and common tools.
 It uses `/workspace` and `linux/amd64`. Override it with `--image`, preferably a
 fully qualified VCR `image@sha256:<digest>` reference. The default digest is declared in
 `minieval/sandbox.py`. The requested image and platform are recorded in `summary.json`.
 
-The harness creates managed images through REST v3 and uses REST v2 for session
-commands. There is no backend selection. `list` and unit tests work without
-Vercel credentials; `run` checks the required configuration before creating a suite.
+For Vercel, the harness creates managed images through REST v3 and uses REST v2
+for session commands. Modal uses its Python SDK and a `node:22-bookworm-slim`
+baseline with Python 3, bash, util-linux (`setpriv`), coreutils, git, curl, CA
+certificates, tar, and gzip. This Modal image tag is mutable. `--image` selects a
+custom registry image for Modal; custom images must already contain the baseline
+tools, including Node 22+ and npm. Both providers run setup as root and use the
+same unprivileged agent and verifier identities. Both use `/workspace` on
+`linux/amd64`. The provider and requested image are recorded in `summary.json`.
+
+`list` and unit tests work without cloud credentials or the Modal SDK; `run`
+checks the selected provider's configuration before creating a suite.
 
 Validation (2026-09-09): Vercel successfully launched the universal image in the
 `minimal-eval` project and returned the digest now pinned by the harness. The
@@ -155,7 +196,15 @@ sample tasks on Vercel (4/4); the permission-boundary test also passed using the
 pinned image.
 See [Vercel's image documentation](https://vercel.com/docs/sandbox/concepts/images).
 
+Modal validation (2026-09-09, SDK 1.5.5): the bundled minimal agent passed
+`fix-median` with `anthropic/claude-haiku-4.5`, including artifact collection and
+cleanup. Live file transfer, command output, timeout termination, binary archive
+export, and agent/verifier permission checks also passed. The permission test
+queries `PR_GET_NO_NEW_PRIVS` directly because Modal omits that field from
+`/proc/self/status`.
+
 ```bash
 python3 -m unittest discover -s tests
 TEST_VERCEL=1 python3 -m unittest discover -s tests -p test_permissions.py
+TEST_MODAL=1 python3 -m unittest discover -s tests
 ```

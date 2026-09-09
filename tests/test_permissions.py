@@ -6,17 +6,21 @@ from pathlib import Path
 from minieval.agents import ScriptAgent
 from minieval.dependencies import install_dependencies
 from minieval.env import load_env
-from minieval.sandbox import VercelSandbox
+from minieval.sandbox import ModalSandbox, VercelSandbox
 
 
-@unittest.skipUnless(os.environ.get('TEST_VERCEL') == '1', 'set TEST_VERCEL=1 for live sandbox permission checks')
 class PermissionTests(unittest.TestCase):
+    test_env = 'TEST_VERCEL'
+    create_sandbox = staticmethod(lambda: VercelSandbox(timeout_ms=120000))
+
     @classmethod
     def setUpClass(cls):
+        if os.environ.get(cls.test_env) != '1':
+            raise unittest.SkipTest(f'set {cls.test_env}=1 for live sandbox permission checks')
         load_env(Path(__file__).resolve().parents[1])
 
     def test_agent_cannot_modify_code_or_read_verifier(self):
-        sandbox = VercelSandbox(timeout_ms=120000)
+        sandbox = self.create_sandbox()
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 source = Path(tmp)
@@ -24,12 +28,13 @@ class PermissionTests(unittest.TestCase):
                 (source / 'run.sh').write_text('exec python3 /agent/check.py "$1"')
                 (source / 'helper').write_text('#!/bin/sh\nprintf executable')
                 (source / 'helper').chmod(0o755)
-                (source / 'check.py').write_text('''import os, subprocess, sys
+                (source / 'check.py').write_text('''import ctypes, os, subprocess, sys
 from pathlib import Path
 assert os.getuid() == 10000
 assert os.getgroups() == []
 status = Path('/proc/self/status').read_text()
-assert 'NoNewPrivs:\\t1' in status
+# Modal's /proc/self/status omits NoNewPrivs; query the kernel flag directly.
+assert ctypes.CDLL(None).prctl(39, 0, 0, 0, 0) == 1  # PR_GET_NO_NEW_PRIVS
 assert 'CapBnd:\\t0000000000000000' in status
 for operation in (
     lambda: Path('/agent/check.py').write_text('changed'),
@@ -78,3 +83,8 @@ else:
                 self.assertEqual(graded.exit_code, 0, graded.stdout + graded.stderr)
         finally:
             sandbox.stop()
+
+
+class ModalPermissionTests(PermissionTests):
+    test_env = 'TEST_MODAL'
+    create_sandbox = staticmethod(lambda: ModalSandbox(timeout_s=120))

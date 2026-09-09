@@ -10,7 +10,7 @@ from pathlib import Path
 from . import env as env_loader
 from .agents import discover_agent, list_agents
 from .runner import run_suite
-from .sandbox import DEFAULT_IMAGE
+from .sandbox import default_image, load_modal
 from .task import discover_tasks
 
 
@@ -33,7 +33,9 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--tasks-dir", default="tasks")
     run.add_argument("--agents-dir", default="agents")
     run.add_argument("--results-dir", default="results")
-    run.add_argument("--image", default=DEFAULT_IMAGE, help="Vercel sandbox image (default: pinned universal image).")
+    run.add_argument("--sandbox", choices=("vercel", "modal"), default=None,
+                     help="Sandbox provider (default: MINIEVAL_SANDBOX or vercel).")
+    run.add_argument("--image", default=None, help="Sandbox image (default depends on provider).")
 
     args = parser.parse_args(argv)
     root = Path.cwd()
@@ -75,14 +77,23 @@ def main(argv: list[str] | None = None) -> None:
     except (ValueError, OSError) as err:
         parser.error(str(err))
 
-    missing = [key for key in ("VERCEL_TOKEN", "VERCEL_PROJECT_ID") if not os.environ.get(key)]
-    if missing:
-        parser.error(f"required Vercel configuration missing: {', '.join(missing)} (set in .env or the environment)")
+    backend = args.sandbox or os.environ.get("MINIEVAL_SANDBOX", "vercel")
+    if backend not in ("vercel", "modal"):
+        parser.error("MINIEVAL_SANDBOX must be vercel or modal")
+    if backend == "vercel":
+        missing = [key for key in ("VERCEL_TOKEN", "VERCEL_PROJECT_ID") if not os.environ.get(key)]
+        if missing:
+            parser.error(f"required Vercel configuration missing: {', '.join(missing)} (set in .env or the environment)")
+    else:
+        try:
+            load_modal().Client.from_env()
+        except Exception as err:
+            parser.error(f"Modal configuration failed: {err}")
 
-    sandbox_kwargs = {"image": args.image}
+    sandbox_kwargs = {"backend": backend, "image": args.image or default_image(backend)}
     print(
         f"Running {len(tasks)} task(s) x {len(agents)} agent/model combos x {args.runs} run(s) "
-        "on Vercel"
+        f"on {backend.capitalize()}"
     )
     run_suite(
         tasks=tasks,

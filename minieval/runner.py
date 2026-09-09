@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from .agents import ARTIFACTS_DIR, Agent
 from .dependencies import MANIFEST_NAME, SETUP_TIMEOUT, install_dependencies
-from .sandbox import DEFAULT_IMAGE, Sandbox, create_sandbox
+from .sandbox import Sandbox, create_sandbox, default_image
 from .task import Task
 from .types import RunResult
 
@@ -129,11 +129,12 @@ def run_suite(
                 status = "PASS" if result.passed else f"FAIL ({result.failure_type})"
                 print(f"  {status} in {result.duration:.0f}s", flush=True)
 
+    backend = (sandbox_kwargs or {}).get("backend", "vercel")
     summary = {
         "name": name,
         "started": stamp,
-        "backend": "vercel",
-        "image": (sandbox_kwargs or {}).get("image", DEFAULT_IMAGE),
+        "backend": backend,
+        "image": (sandbox_kwargs or {}).get("image", default_image(backend)),
         "platform": "linux/amd64",
         "runs_per_combination": runs,
         "results": [r.as_dict() for r in results],

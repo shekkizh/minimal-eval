@@ -5,9 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "minieval"
 version = "0.1.0"
-description = "A minimal agent eval harness: inject-and-start agents in disposable Vercel sandboxes, hidden per-task verifiers."
+description = "A minimal agent eval harness: inject-and-start agents in disposable sandboxes, hidden per-task verifiers."
 requires-python = ">=3.10"
 dependencies = []
+
+[project.optional-dependencies]
+modal = ["modal>=1.5.5,<2"]
 
 [project.scripts]
 minieval = "minieval.__main__:main"

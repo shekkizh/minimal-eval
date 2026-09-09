@@ -1,10 +1,12 @@
-"""Disposable Vercel sandboxes."""
+"""Disposable Vercel and Modal sandboxes."""
 
 from __future__ import annotations
 
 import base64
+import importlib
 import io
 import json
+import math
 import os
 import tarfile
 import time
@@ -13,7 +15,8 @@ import urllib.parse
 import urllib.request
 import uuid
 from abc import ABC, abstractmethod
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path, PurePosixPath
 from typing import cast
 
 from .types import CommandResult
@@ -23,6 +26,21 @@ DEFAULT_IMAGE = (
     "vcr.vercel.com/vercel/sandbox/universal@"
     "sha256:0e3e3617e824397f170fc7c43ccaa565dd7ac36518e83ead3d41e077cd9f6ec7"
 )
+DEFAULT_MODAL_IMAGE = "node:22-bookworm-slim"
+
+
+def default_image(backend: str) -> str:
+    return DEFAULT_MODAL_IMAGE if backend == "modal" else DEFAULT_IMAGE
+
+
+def load_modal():
+    """Keep the SDK optional for Vercel runs and offline discovery/tests."""
+    try:
+        return importlib.import_module("modal")
+    except ModuleNotFoundError as err:
+        if err.name != "modal":
+            raise
+        raise ValueError('Modal requires the optional SDK: pip install -e ".[modal]"') from err
 
 
 class Sandbox(ABC):
@@ -266,6 +284,83 @@ class VercelSandbox(Sandbox):
             pass
 
 
-def create_sandbox(timeout_s: float = 600.0, **kwargs) -> Sandbox:
-    """Create a Vercel sandbox, reserving additional time for grading."""
-    return VercelSandbox(timeout_ms=int((timeout_s + 180) * 1000), **kwargs)
+class ModalSandbox(Sandbox):
+    """Modal SDK adapter; authentication stays on the host in Modal's config."""
+
+    def __init__(self, image: str = DEFAULT_MODAL_IMAGE, timeout_s: float = 600.0,
+                 workdir: str = "/workspace"):
+        self._modal = load_modal()
+        self.workdir = workdir
+        self.image = image
+        runtime = self._modal.Image.from_registry(image)
+        if image == DEFAULT_MODAL_IMAGE:
+            runtime = runtime.apt_install(
+                "python3", "bash", "util-linux", "coreutils", "git", "curl", "ca-certificates", "tar", "gzip",
+            )
+        runtime = runtime.dockerfile_commands("USER root").workdir(workdir)
+        app = self._modal.App.lookup("minieval", create_if_missing=True)
+        self._sandbox = self._modal.Sandbox.create(
+            app=app, image=runtime, timeout=math.ceil(timeout_s), workdir=workdir,
+            cpu=1.0, memory=2048,
+        )
+        try:
+            result = self.exec(["mkdir", "-p", workdir], cwd="/")
+            if not result.ok:
+                raise RuntimeError(f"workspace setup failed: {result.stderr}")
+        except Exception:
+            self.stop()
+            raise
+
+    @property
+    def sandbox_id(self) -> str:
+        return self._sandbox.object_id
+
+    def exec(self, cmd: list[str], cwd: str | None = None,
+             env: dict[str, str] | None = None, timeout: float | None = None) -> CommandResult:
+        limit = math.ceil(timeout if timeout is not None else 120.0)
+        process = self._sandbox.exec(*cmd, workdir=cwd or self.workdir,
+                                     env=env or {}, timeout=limit)
+
+        def read(stream) -> str:
+            chunks = []
+            try:
+                for chunk in stream:
+                    chunks.append(chunk)
+            except self._modal.exception.ExecTimeoutError:
+                pass  # Keep any output received before the execution deadline.
+            return "".join(chunks)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            stdout = pool.submit(read, process.stdout)
+            stderr = pool.submit(read, process.stderr)
+            try:
+                exit_code = process.wait()
+            except self._modal.exception.ExecTimeoutError:
+                exit_code = -1
+            out, err = stdout.result(), stderr.result()
+        # Modal 1.5 returns -1 when an exec reaches its server-side deadline.
+        if exit_code == -1:
+            return CommandResult(124, out, err + f"\ntimeout after {limit}s")
+        return CommandResult(exit_code, out, err)
+
+    def write_files(self, files: dict[str, str | bytes], extract_dir: str | None = None) -> None:
+        root = PurePosixPath(extract_dir or self.workdir)
+        for name, content in files.items():
+            relative = PurePosixPath(name.lstrip("/"))
+            if ".." in relative.parts or relative == PurePosixPath("."):
+                raise ValueError(f"invalid upload path: {name}")
+            path = str(root / relative)
+            payload = content.encode("utf-8") if isinstance(content, str) else content
+            self._sandbox.filesystem.write_bytes(payload, path)
+
+    def stop(self) -> None:
+        self._sandbox.terminate(wait=True)
+
+
+def create_sandbox(timeout_s: float = 600.0, backend: str = "vercel", **kwargs) -> Sandbox:
+    """Create a sandbox, reserving additional time for grading."""
+    if backend == "modal":
+        return ModalSandbox(timeout_s=timeout_s + 180, **kwargs)
+    if backend == "vercel":
+        return VercelSandbox(timeout_ms=int((timeout_s + 180) * 1000), **kwargs)
+    raise ValueError(f"unknown sandbox backend: {backend}")
