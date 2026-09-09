@@ -1,0 +1,4 @@
+{
+  "description": "Fix a buggy statistics script so it matches its documented spec",
+  "tags": ["bugfix", "python"]
+}

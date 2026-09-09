@@ -1,0 +1,4 @@
+{
+  "description": "Write a JSON-to-CSV converter script with deterministic ordering",
+  "tags": ["implement", "python", "cli"]
+}
